@@ -37,7 +37,7 @@ jobs:
           - os_name: windows
             runner: windows-latest
           - os_name: macos
-            runner: macos-latest
+            runner: macos-13
 
     steps:
       - name: Check out repository
