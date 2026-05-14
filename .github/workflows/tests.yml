@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-supported-pythons:
     name: ${{ matrix.os_name }}
@@ -59,8 +63,8 @@ jobs:
       - name: Run tests across supported Python versions
         shell: bash
         env:
-          RSLOOP_PYTHON_VERSIONS: ${{ github.event.inputs.python_versions || '' }}
-          RSLOOP_BUILD_MODE: ${{ github.event.inputs.build_mode || 'debug' }}
+          RSLOOP_PYTHON_VERSIONS: ${{ inputs.python_versions || '' }}
+          RSLOOP_BUILD_MODE: ${{ inputs.build_mode || 'debug' }}
         run: |
           args=()
           if [[ "$RSLOOP_BUILD_MODE" == "debug" ]]; then
