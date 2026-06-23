@@ -98,7 +98,7 @@ struct TcpServerSocketOptions {
     keep_alive: Option<bool>,
 }
 
-#[pyclass(subclass, module = "rsloop._loop")]
+#[pyclass(subclass, module = "rsloop._loop", weakref)]
 pub struct PyLoop {
     pub core: Arc<LoopCore>,
 }
