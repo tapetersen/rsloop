@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import inspect
 import os
 import signal
@@ -12,6 +13,7 @@ import time
 import threading
 import unittest
 import warnings
+import weakref
 import builtins
 import pathlib
 from unittest import mock
@@ -798,6 +800,22 @@ class CompatibilityTests(unittest.TestCase):
                 "ssl_shutdown_timeout is only meaningful with ssl",
             ),
         )
+
+    def test_loop_allows_weak_refs(self) -> None:
+        loop_ref: weakref.ReferenceType[asyncio.AbstractEventLoop] | None = None
+
+        async def main():
+            nonlocal loop_ref
+            loop = asyncio.get_running_loop()
+            num_refs = weakref.getweakrefcount(loop)
+            loop_ref = weakref.ref(loop)
+            self.assertEqual(weakref.getweakrefcount(loop), num_refs + 1)
+            self.assertIs(loop_ref(), loop)
+
+        rsloop.run(main())
+        assert loop_ref is not None
+        gc.collect()
+        self.assertIsNone(loop_ref())
 
     def test_create_subprocess_accepts_explicit_popen_defaults(self) -> None:
         async def main():
