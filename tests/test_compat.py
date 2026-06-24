@@ -816,3 +816,17 @@ class CompatibilityTests(unittest.TestCase):
         assert loop_ref is not None
         gc.collect()
         self.assertIsNone(loop_ref())
+
+    def test_create_subprocess_accepts_explicit_popen_defaults(self) -> None:
+        async def main():
+            await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import sys;sys.exit(0)",
+                cwd=None,
+                env=None,
+                executable=None,
+                umask=-1,
+            )
+
+        rsloop.run(main())

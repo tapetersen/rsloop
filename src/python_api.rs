@@ -1146,14 +1146,17 @@ fn apply_process_cwd(
     command: &mut Command,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    command.current_dir(process_fspath(py, value)?);
+    if !value.is_none() {
+        command.current_dir(process_fspath(py, value)?);
+    }
     Ok(())
 }
 
 fn apply_process_env(command: &mut Command, value: &Bound<'_, PyAny>) -> PyResult<()> {
-    let env_dict = value.cast::<PyDict>()?;
-    for (env_key, env_value) in env_dict.iter() {
-        command.env(env_key.extract::<String>()?, env_value.extract::<String>()?);
+    if !value.is_none() {
+        for (env_key, env_value) in value.cast::<PyDict>()?.iter() {
+            command.env(env_key.extract::<String>()?, env_value.extract::<String>()?);
+        }
     }
     Ok(())
 }
@@ -1163,19 +1166,19 @@ fn apply_process_executable(
     command: &mut Command,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    let executable = process_fspath(py, value)?;
-    #[cfg(unix)]
-    {
+    if !value.is_none() {
+        let executable = process_fspath(py, value)?;
+        #[cfg(unix)]
         command.arg0(executable);
-        Ok(())
+        #[cfg(windows)]
+        {
+            drop(executable);
+            return Err(PyNotImplementedError::new_err(
+                "subprocess executable override is not implemented on Windows",
+            ));
+        }
     }
-    #[cfg(windows)]
-    {
-        drop(executable);
-        Err(PyNotImplementedError::new_err(
-            "subprocess executable override is not implemented on Windows",
-        ))
-    }
+    Ok(())
 }
 
 struct UnixProcessKw<'a, 'py> {
@@ -1255,10 +1258,13 @@ fn apply_unix_misc_process_kw(kw: &mut UnixProcessKw<'_, '_>) -> PyResult<bool> 
     match kw.key {
         "umask" => {
             let mask = kw.value.extract::<i64>()?;
-            if !(0..=PROCESS_UMASK_MAX).contains(&mask) {
-                return Err(PyValueError::new_err("umask must be between 0 and 0o777"));
+            // Popen umask=-1 is default for "no change".
+            if mask != -1 {
+                if !(0..=PROCESS_UMASK_MAX).contains(&mask) {
+                    return Err(PyValueError::new_err("umask must be between 0 and 0o777"));
+                }
+                kw.unix.umask = Some(mask as u32);
             }
-            kw.unix.umask = Some(mask as u32);
         }
         "preexec_fn" => {
             return Err(PyNotImplementedError::new_err(
