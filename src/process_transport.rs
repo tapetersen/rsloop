@@ -660,7 +660,9 @@ impl PyProcessPipeTransport {
         self.core.closing.load(Ordering::SeqCst)
     }
 
-    fn get_extra_info(&self, py: Python<'_>, _name: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
+    #[pyo3(signature=(name, default=None))]
+    fn get_extra_info(&self, py: Python<'_>, name: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
+        let _ = name;
         default.unwrap_or_else(|| py.None())
     }
 

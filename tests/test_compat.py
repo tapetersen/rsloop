@@ -941,3 +941,139 @@ class CompatibilityTests(unittest.TestCase):
                     transport.close()
 
         rsloop.run(main())
+
+    # ------------------------------------------------------------------
+    # Known asyncio API gaps (audit follow-up).
+    #
+    # Each test below asserts a *documented* asyncio interface that rsloop
+    # does not yet implement. They are marked ``expectedFailure`` so the
+    # suite stays green while tracking the gap; when a gap is closed the
+    # test flips to an "unexpected success", prompting removal of the
+    # decorator. These are NOT among the limitations listed in the docs
+    # (TLS/encrypted keys/preexec_fn/Unix-only APIs), so they are real
+    # divergences rather than intentional ones.
+    # ------------------------------------------------------------------
+
+    @unittest.expectedFailure
+    def test_stream_reader_supports_readline(self) -> None:
+        # asyncio.StreamReader.readline() — fast-stream reader lacks it.
+        async def main() -> bytes:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"first line\nsecond")
+                reader, writer = await asyncio.open_connection(sock=left)
+                try:
+                    return await asyncio.wait_for(reader.readline(), 1.0)
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), b"first line\n")
+
+    @unittest.expectedFailure
+    def test_stream_reader_supports_readuntil(self) -> None:
+        # asyncio.StreamReader.readuntil(separator=b"\n") — not implemented.
+        async def main() -> bytes:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"key=value;rest")
+                reader, writer = await asyncio.open_connection(sock=left)
+                try:
+                    return await asyncio.wait_for(reader.readuntil(b";"), 1.0)
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), b"key=value;")
+
+    @unittest.expectedFailure
+    def test_stream_writer_supports_start_tls(self) -> None:
+        # asyncio.StreamWriter.start_tls() — documented since 3.11.
+        async def main() -> bool:
+            left, right = socket.socketpair()
+            with left, right:
+                reader, writer = await asyncio.open_connection(sock=left)
+                try:
+                    return callable(writer.start_tls)
+                finally:
+                    writer.close()
+
+        self.assertTrue(rsloop.run(main()))
+
+    @unittest.expectedFailure
+    def test_subprocess_transport_supports_get_extra_info(self) -> None:
+        # asyncio BaseTransport.get_extra_info() — missing on ProcessTransport.
+        async def main() -> object:
+            loop = asyncio.get_running_loop()
+            transport, _ = await loop.subprocess_exec(
+                asyncio.SubprocessProtocol, sys.executable, "-c", "pass"
+            )
+            try:
+                return transport.get_extra_info("subprocess", None)
+            finally:
+                transport.close()
+
+        rsloop.run(main())
+
+    @unittest.expectedFailure
+    def test_subprocess_transport_supports_protocol_accessors(self) -> None:
+        # asyncio BaseTransport.get_protocol()/set_protocol() — missing here.
+        async def main() -> bool:
+            loop = asyncio.get_running_loop()
+            transport, _ = await loop.subprocess_exec(
+                asyncio.SubprocessProtocol, sys.executable, "-c", "pass"
+            )
+            try:
+                return callable(transport.get_protocol) and callable(
+                    transport.set_protocol
+                )
+            finally:
+                transport.close()
+
+        self.assertTrue(rsloop.run(main()))
+
+    @unittest.expectedFailure
+    def test_server_supports_close_and_abort_clients(self) -> None:
+        # asyncio.Server.close_clients()/abort_clients() — added in 3.13.
+        async def main() -> bool:
+            loop = asyncio.get_running_loop()
+            server = await loop.create_server(asyncio.Protocol, "127.0.0.1", 0)
+            try:
+                return callable(server.close_clients) and callable(
+                    server.abort_clients
+                )
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        self.assertTrue(rsloop.run(main()))
+
+    @unittest.expectedFailure
+    def test_writelines_accepts_documented_list_of_data_keyword(self) -> None:
+        # Documented name is WriteTransport.writelines(list_of_data); rsloop
+        # names the parameter "seq", so the documented keyword call fails.
+        async def main() -> None:
+            loop = asyncio.get_running_loop()
+            left, right = socket.socketpair()
+            with left, right:
+                transport, _ = await loop.create_connection(asyncio.Protocol, sock=left)
+                try:
+                    transport.writelines(list_of_data=[b"a", b"b"])
+                finally:
+                    transport.close()
+
+        rsloop.run(main())
+
+    @unittest.expectedFailure
+    def test_send_signal_accepts_documented_signal_keyword(self) -> None:
+        # Documented name is SubprocessTransport.send_signal(signal); rsloop
+        # names the parameter "sig", so the documented keyword call fails.
+        async def main() -> None:
+            loop = asyncio.get_running_loop()
+            transport, _ = await loop.subprocess_exec(
+                asyncio.SubprocessProtocol, sys.executable, "-c", "import time;time.sleep(5)"
+            )
+            try:
+                transport.send_signal(signal=signal.SIGTERM)
+            finally:
+                transport.close()
+
+        rsloop.run(main())
