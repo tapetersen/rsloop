@@ -569,6 +569,11 @@ class CompatibilityTests(unittest.TestCase):
                     remote_addr=("127.0.0.1", port),
                 )
                 try:
+                    # remote_addr connects the socket, so peername is populated.
+                    peername = client_transport.get_extra_info("peername")
+                    self.assertEqual(peername[:2], ("127.0.0.1", port))
+                    sock = client_transport.get_extra_info("socket")
+                    self.assertEqual(tuple(sock.getpeername()), tuple(peername))
                     return await asyncio.wait_for(done, 1.0)
                 finally:
                     client_transport.close()
