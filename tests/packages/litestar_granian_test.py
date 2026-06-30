@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from typing import Dict
 
 import rsloop
 from granian.server.embed import Server
@@ -9,7 +10,7 @@ from litestar import Litestar, get
 
 
 @get("/")
-async def index() -> dict[str, str]:
+async def index() -> Dict[str, str]:
     loop = asyncio.get_running_loop()
     return {
         "ok": "litestar-granian-rsloop",

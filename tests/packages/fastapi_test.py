@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Dict
 
 import rsloop
 from fastapi import FastAPI
@@ -12,7 +13,7 @@ app = FastAPI()
 
 
 @app.get("/")
-async def index() -> dict[str, str]:
+async def index() -> Dict[str, str]:
     loop = asyncio.get_running_loop()
     return {
         "ok": "fastapi-rsloop",
