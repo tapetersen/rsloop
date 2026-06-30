@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 from ._bootstrap import bootstrap as __bootstrap
 
 __bootstrap()

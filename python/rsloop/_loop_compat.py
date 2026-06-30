@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio as __asyncio
-import asyncio.base_events as __asyncio_base_events
 import contextlib as __contextlib
 import io as __io
 import os as __os
@@ -10,7 +9,7 @@ import sys as __sys
 import typing as __typing
 
 from ._loop import PyLoop as Loop
-from ._loop import __version__
+from ._loop import __version__ as __version__
 from ._loop import open_connection as __open_connection
 from ._loop import start_server as __start_server
 
