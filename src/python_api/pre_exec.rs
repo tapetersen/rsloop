@@ -30,7 +30,7 @@ fn apply_in_child(config: &UnixPreExecConfig) -> std::io::Result<()> {
 
 #[cfg(unix)]
 /// SAFETY: Must only be called from the child process between fork and exec.
-unsafe fn restore_child_signals(restore_signals: bool) -> std::io::Result<()> {
+unsafe fn restore_child_signals(restore_signals: bool) -> std::io::Result<()> { unsafe {
     if !restore_signals {
         return Ok(());
     }
@@ -44,11 +44,11 @@ unsafe fn restore_child_signals(restore_signals: bool) -> std::io::Result<()> {
     }
 
     Ok(())
-}
+}}
 
 #[cfg(unix)]
 /// SAFETY: Must only be called from the child process between fork and exec.
-unsafe fn clear_pass_fds_cloexec(pass_fds: &[i32]) -> std::io::Result<()> {
+unsafe fn clear_pass_fds_cloexec(pass_fds: &[i32]) -> std::io::Result<()> { unsafe {
     for fd in pass_fds {
         let flags = libc::fcntl(*fd, libc::F_GETFD);
         if flags == -1 {
@@ -59,11 +59,11 @@ unsafe fn clear_pass_fds_cloexec(pass_fds: &[i32]) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
+}}
 
 #[cfg(unix)]
 /// SAFETY: Must only be called from the child process between fork and exec.
-unsafe fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> {
+unsafe fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> { unsafe {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let ngroups = config.extra_groups.as_ref().map(Vec::len);
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -83,31 +83,27 @@ unsafe fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<
     if config.start_new_session && libc::setsid() == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    if let Some(process_group) = config.process_group {
-        if !(config.start_new_session && process_group == 0)
+    if let Some(process_group) = config.process_group
+        && !(config.start_new_session && process_group == 0)
             && libc::setpgid(0, process_group) == -1
         {
             return Err(std::io::Error::last_os_error());
         }
-    }
-    if let Some(groups) = &config.extra_groups {
-        if libc::setgroups(ngroups.expect("extra_groups present"), groups.as_ptr()) == -1 {
+    if let Some(groups) = &config.extra_groups
+        && libc::setgroups(ngroups.expect("extra_groups present"), groups.as_ptr()) == -1 {
             return Err(std::io::Error::last_os_error());
         }
-    }
-    if let Some(gid) = config.gid {
-        if libc::setgid(gid) == -1 {
+    if let Some(gid) = config.gid
+        && libc::setgid(gid) == -1 {
             return Err(std::io::Error::last_os_error());
         }
-    }
-    if let Some(uid) = config.uid {
-        if libc::setuid(uid) == -1 {
+    if let Some(uid) = config.uid
+        && libc::setuid(uid) == -1 {
             return Err(std::io::Error::last_os_error());
         }
-    }
     if let Some(umask) = config.umask {
         libc::umask(umask as libc::mode_t);
     }
 
     Ok(())
-}
+}}

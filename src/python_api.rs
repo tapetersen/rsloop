@@ -827,15 +827,14 @@ fn apply_tcp_server_socket_options(
             (options.sol_socket.clone(), options.so_reuseaddr.clone(), 1),
         )?;
     }
-    if reuse_port == Some(true) {
-        if let Some(so_reuseport) = options.so_reuseport {
+    if reuse_port == Some(true)
+        && let Some(so_reuseport) = options.so_reuseport {
             sock.call_method1(
                 py,
                 "setsockopt",
                 (options.sol_socket.clone(), so_reuseport.clone(), 1),
             )?;
         }
-    }
     if let Some(keep_alive) = keep_alive {
         #[cfg(unix)]
         set_tcp_keepalive_option(py, sock, keep_alive)?;
@@ -1590,21 +1589,18 @@ impl PyLoop {
                     .map(|name| name.clone_ref(py))
                     .unwrap_or_else(|| py.None());
                 task_kwargs.set_item("name", factory_name)?;
-            } else if task_kwarg_support.name {
-                if let Some(name) = name.as_ref() {
+            } else if task_kwarg_support.name
+                && let Some(name) = name.as_ref() {
                     task_kwargs.set_item("name", name)?;
                 }
-            }
-            if let Some(context) = context.as_ref() {
-                if task_factory.is_some() || task_kwarg_support.context {
+            if let Some(context) = context.as_ref()
+                && (task_factory.is_some() || task_kwarg_support.context) {
                     task_kwargs.set_item("context", context)?;
                 }
-            }
-            if let Some(eager_start) = eager_start {
-                if task_factory.is_some() || task_kwarg_support.eager_start {
+            if let Some(eager_start) = eager_start
+                && (task_factory.is_some() || task_kwarg_support.eager_start) {
                     task_kwargs.set_item("eager_start", eager_start)?;
                 }
-            }
             Some(task_kwargs)
         } else {
             None

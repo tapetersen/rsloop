@@ -1157,11 +1157,10 @@ impl StreamTransportCore {
                     state.context_needs_run,
                 )
             };
-            if let Some(fast_path) = fast_path.as_ref() {
-                if fast_path.connection_made(py, transport.clone_ref(py))? {
+            if let Some(fast_path) = fast_path.as_ref()
+                && fast_path.connection_made(py, transport.clone_ref(py))? {
                     return Ok(());
                 }
-            }
             self.call_protocol_method1(
                 py,
                 &callback,

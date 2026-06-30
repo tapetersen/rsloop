@@ -472,13 +472,12 @@ impl LoopCore {
                 };
             }
 
-            if pending_signal_error.is_none() {
-                if let Err(err) = py.check_signals() {
+            if pending_signal_error.is_none()
+                && let Err(err) = py.check_signals() {
                     let _ = self.send_command(LoopCommand::RequestStop);
                     pending_signal_error = Some(err);
                     continue;
                 }
-            }
 
             let wake_rx = Arc::clone(&wake_rx);
             match py.detach(move || {

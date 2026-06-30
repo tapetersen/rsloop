@@ -1001,13 +1001,11 @@ fn native_stream_loop(
     if !loop_obj.bind(py).is_instance_of::<PyLoop>() {
         return Ok(None);
     }
-    if let Some(kwargs) = kwargs {
-        if let Some(ssl) = kwargs.get_item("ssl")? {
-            if !ssl.is_none() {
+    if let Some(kwargs) = kwargs
+        && let Some(ssl) = kwargs.get_item("ssl")?
+            && !ssl.is_none() {
                 return Ok(None);
             }
-        }
-    }
     Ok(Some(loop_obj))
 }
 
