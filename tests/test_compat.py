@@ -969,7 +969,6 @@ class CompatibilityTests(unittest.TestCase):
 
         self.assertEqual(rsloop.run(main()), b"first line\n")
 
-    @unittest.expectedFailure
     def test_stream_reader_supports_readuntil(self) -> None:
         # asyncio.StreamReader.readuntil(separator=b"\n") — not implemented.
         async def main() -> bytes:
@@ -983,6 +982,82 @@ class CompatibilityTests(unittest.TestCase):
                     writer.close()
 
         self.assertEqual(rsloop.run(main()), b"key=value;")
+
+    def test_stream_reader_readuntil_multibyte_separator(self) -> None:
+        # readuntil accepts a multi-byte separator, including one split across reads.
+        async def main() -> bytes:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"abc\r")
+                reader, writer = await asyncio.open_connection(sock=left)
+                right.sendall(b"\ndef")
+                try:
+                    return await asyncio.wait_for(reader.readuntil(b"\r\n"), 1.0)
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), b"abc\r\n")
+
+    def test_stream_reader_readuntil_tuple_shortest_wins(self) -> None:
+        # readuntil accepts a tuple of separators; the shortest match wins.
+        async def main() -> bytes:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"hello||world")
+                reader, writer = await asyncio.open_connection(sock=left)
+                try:
+                    return await asyncio.wait_for(reader.readuntil((b"|", b"||")), 1.0)
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), b"hello|")
+
+    def test_stream_reader_readuntil_incomplete_read_on_eof(self) -> None:
+        # readuntil raises IncompleteReadError with the partial data when EOF hits first.
+        async def main() -> bytes:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"no terminator")
+                reader, writer = await asyncio.open_connection(sock=left)
+                right.shutdown(socket.SHUT_WR)
+                try:
+                    with self.assertRaises(asyncio.IncompleteReadError) as ctx:
+                        await asyncio.wait_for(reader.readuntil(b";"), 1.0)
+                    return ctx.exception.partial
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), b"no terminator")
+
+    def test_stream_reader_readuntil_limit_overrun(self) -> None:
+        # readuntil raises LimitOverrunError when the separator is beyond the limit.
+        async def main() -> int:
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b"x" * 100 + b";")
+                reader, writer = await asyncio.open_connection(sock=left, limit=16)
+                try:
+                    with self.assertRaises(asyncio.LimitOverrunError) as ctx:
+                        await asyncio.wait_for(reader.readuntil(b";"), 1.0)
+                    return ctx.exception.consumed
+                finally:
+                    writer.close()
+
+        self.assertEqual(rsloop.run(main()), 100)
+
+    def test_stream_reader_readuntil_rejects_empty_separator(self) -> None:
+        # readuntil rejects an empty separator with ValueError.
+        async def main() -> None:
+            left, right = socket.socketpair()
+            with left, right:
+                reader, writer = await asyncio.open_connection(sock=left)
+                try:
+                    with self.assertRaises(ValueError):
+                        await reader.readuntil(b"")
+                finally:
+                    writer.close()
+
+        rsloop.run(main())
 
     @unittest.expectedFailure
     def test_stream_writer_supports_start_tls(self) -> None:

@@ -1,4 +1,5 @@
-use pyo3::exceptions::PyValueError;
+use memchr::memmem;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::TaskLocals;
@@ -80,11 +81,96 @@ impl ReadBuffer {
     }
 }
 
-#[derive(Clone)]
 enum ReadWaitKind {
     Any(usize),
     Exact(usize),
+    Until(Separators),
     All,
+}
+
+/// The outcome of attempting a read, reduced to a deliverable future payload:
+/// any buffer side effects (consume / resume / reset-on-eof) have already been
+/// applied, so the caller only has to decide *how* to hand it to a future.
+enum ReadReady {
+    Result(Py<PyBytes>),
+    Exception(Py<PyAny>),
+    Wait,
+}
+
+/// Validated `readuntil` separators: sorted by length (ascending), always
+/// non-empty with non-empty elements, with the length extents precomputed once.
+struct Separators {
+    items: Box<[Box<[u8]>]>,
+    min_len: usize,
+    max_len: usize,
+}
+
+impl Separators {
+    /// Build validated separators from raw byte strings: sort by length, ensure
+    /// the collection and each element are non-empty, and precompute the extents.
+    fn new(mut items: Vec<Box<[u8]>>) -> PyResult<Self> {
+        items.sort_by_key(|s| s.len());
+        let (Some(shortest), Some(longest)) = (items.first(), items.last()) else {
+            return Err(PyValueError::new_err(
+                "Separator should contain at least one element",
+            ));
+        };
+        let min_len = shortest.len();
+        let max_len = longest.len();
+        if min_len == 0 {
+            return Err(PyValueError::new_err(
+                "Separator should be at least one-byte string",
+            ));
+        }
+        Ok(Self {
+            items: items.into_boxed_slice(),
+            min_len,
+            max_len,
+        })
+    }
+
+    /// Find the match with the smallest end offset across all separators,
+    /// mirroring vanilla asyncio's "shortest result that has any separator as a
+    /// suffix" rule. Returns `(match_start, match_end)` into `haystack`.
+    fn find_shortest(&self, haystack: &[u8]) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        for sep in &self.items {
+            if let Some(start) = memmem::find(haystack, sep) {
+                let end = start + sep.len();
+                if best.is_none_or(|(_, best_end)| end < best_end) {
+                    best = Some((start, end));
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Extract the raw separator byte strings from a Python `readuntil` argument:
+/// `None` defaults to `b"\n"`, a tuple yields each element, and anything else is
+/// a single separator. Rejects values that are not bytes-like.
+fn extract_separators(separator: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Box<[u8]>>> {
+    let objects: Vec<Bound<'_, PyAny>> = match separator {
+        None => return Ok(vec![Box::from(&b"\n"[..])]),
+        Some(obj) => match obj.cast::<PyTuple>() {
+            Ok(tuple) => tuple.iter().collect(),
+            Err(_) => vec![obj.clone()],
+        },
+    };
+    objects
+        .into_iter()
+        .map(|obj| {
+            if let Ok(b) = obj.cast::<PyBytes>() {
+                Ok(b.as_bytes().to_vec().into_boxed_slice())
+            } else if let Ok(ba) = obj.cast::<PyByteArray>() {
+                Ok(ba.to_vec().into_boxed_slice())
+            } else {
+                Err(PyTypeError::new_err(
+                    "separator must be bytes, bytearray, or a tuple of them",
+                ))
+            }
+        })
+        .collect()
 }
 
 struct ReadWaiter {
@@ -108,7 +194,7 @@ impl PyFastStreamReader {
     fn set_future_result_or_ignore_cancelled(
         py: Python<'_>,
         future: &Py<PyAny>,
-        value: Py<PyAny>,
+        value: Py<PyBytes>,
     ) -> PyResult<()> {
         let future = future.bind(py);
         match python_names::call_method1(py, future, python_names::set_result(py), value.bind(py)) {
@@ -170,7 +256,11 @@ impl PyFastStreamReader {
         python_names::call_method0(py, self.loop_obj.bind(py), python_names::create_future(py))
     }
 
-    fn ready_result_future(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    fn ready_result_future(
+        &self,
+        py: Python<'_>,
+        value: Py<PyBytes>,
+    ) -> PyResult<Py<PyAny>> {
         let future = self.create_future(py)?;
         python_names::call_method1(
             py,
@@ -192,19 +282,29 @@ impl PyFastStreamReader {
         Ok(future)
     }
 
-    #[inline]
-    fn bytes_object(py: Python<'_>, data: &[u8]) -> Py<PyAny> {
-        PyBytes::new(py, data).unbind().into_any()
+    /// If a stream exception has been stored, return a future already resolved
+    /// with it. Every read method must surface the stored exception, so this is
+    /// checked at the entry points before any buffering logic runs.
+    fn ready_exception_future_if_set(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.exception.as_ref() {
+            Some(exc) => Ok(Some(self.ready_exception_future(py, exc.clone_ref(py))?)),
+            None => Ok(None),
+        }
     }
 
-    fn unread_bytes_object(&mut self, py: Python<'_>, n: usize) -> Py<PyAny> {
+    #[inline]
+    fn bytes_object(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
+        PyBytes::new(py, data).unbind()
+    }
+
+    fn unread_bytes_object(&mut self, py: Python<'_>, n: usize) -> Py<PyBytes> {
         let len = self.buffer.len().min(n);
         let value = Self::bytes_object(py, &self.buffer.unread()[..len]);
         self.buffer.consume(len);
         value
     }
 
-    fn unread_all_bytes_object(&mut self, py: Python<'_>) -> Py<PyAny> {
+    fn unread_all_bytes_object(&mut self, py: Python<'_>) -> Py<PyBytes> {
         let value = Self::bytes_object(py, self.buffer.unread());
         self.buffer.consume_all();
         value
@@ -213,7 +313,7 @@ impl PyFastStreamReader {
     fn incomplete_read_error(
         py: Python<'_>,
         partial: &[u8],
-        expected: usize,
+        expected: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let asyncio = py.import("asyncio")?;
         Ok(asyncio
@@ -255,57 +355,35 @@ impl PyFastStreamReader {
     }
 
     fn maybe_complete_waiter(&mut self, py: Python<'_>) -> PyResult<()> {
-        let Some((future, kind)) = self
-            .waiter
-            .as_ref()
-            .map(|waiter| (waiter.future.clone_ref(py), waiter.kind.clone()))
-        else {
-            return Ok(());
-        };
-
-        if let Some(exc) = self.exception.as_ref() {
-            self.waiter = None;
-            Self::set_future_exception_or_ignore_cancelled(py, &future, exc.clone_ref(py))?;
-            return Ok(());
+        if let Some(waiter) = self.waiter.take() {
+            // `try_resolve_waiter` hands the waiter back if it still must wait, or
+            // returns `None` once its future has been resolved. Exactly one place
+            // decides its fate, so no branch can leak or double-complete it.
+            self.waiter = self.try_resolve_waiter(py, waiter)?;
         }
-
-        match kind {
-            ReadWaitKind::Any(n) => {
-                if self.buffer.is_empty() && !self.eof {
-                    return Ok(());
-                }
-                self.waiter = None;
-                let data = self.unread_bytes_object(py, n);
-                self.maybe_resume_transport(py)?;
-                Self::set_future_result_or_ignore_cancelled(py, &future, data)?;
-            }
-            ReadWaitKind::Exact(n) => {
-                if self.buffer.len() >= n {
-                    self.waiter = None;
-                    let data = self.unread_bytes_object(py, n);
-                    self.maybe_resume_transport(py)?;
-                    Self::set_future_result_or_ignore_cancelled(py, &future, data)?;
-                    return Ok(());
-                }
-                if !self.eof {
-                    return Ok(());
-                }
-                let err = Self::incomplete_read_error(py, self.buffer.unread(), n)?;
-                self.buffer.consume_all();
-                self.waiter = None;
-                Self::set_future_exception_or_ignore_cancelled(py, &future, err)?;
-            }
-            ReadWaitKind::All => {
-                if !self.eof {
-                    return Ok(());
-                }
-                self.waiter = None;
-                let data = self.unread_all_bytes_object(py);
-                Self::set_future_result_or_ignore_cancelled(py, &future, data)?;
-            }
-        }
-
         Ok(())
+    }
+
+    fn try_resolve_waiter(
+        &mut self,
+        py: Python<'_>,
+        waiter: ReadWaiter,
+    ) -> PyResult<Option<ReadWaiter>> {
+        if let Some(exc) = self.exception.as_ref() {
+            Self::set_future_exception_or_ignore_cancelled(py, &waiter.future, exc.clone_ref(py))?;
+            return Ok(None);
+        }
+
+        match self.resolve_read(py, &waiter.kind)? {
+            ReadReady::Result(data) => {
+                Self::set_future_result_or_ignore_cancelled(py, &waiter.future, data)?;
+            }
+            ReadReady::Exception(err) => {
+                Self::set_future_exception_or_ignore_cancelled(py, &waiter.future, err)?;
+            }
+            ReadReady::Wait => return Ok(Some(waiter)),
+        }
+        Ok(None)
     }
 
     fn start_waiter(
@@ -368,47 +446,142 @@ impl PyFastStreamReader {
         self.maybe_complete_waiter(py)
     }
 
-    fn build_read_future(&mut self, py: Python<'_>, n: isize) -> PyResult<Py<PyAny>> {
-        if let Some(exc) = self.exception.as_ref() {
-            return self.ready_exception_future(py, exc.clone_ref(py));
+    /// Scan the buffer for a `readuntil` separator and reduce the result to a
+    /// deliverable payload, applying the buffer side effects.
+    fn resolve_until(&mut self, py: Python<'_>, separators: &Separators) -> PyResult<ReadReady> {
+        let haystack = self.buffer.unread();
+        let buflen = haystack.len();
+
+        if buflen >= separators.min_len {
+            if let Some((match_start, match_end)) = separators.find_shortest(haystack) {
+                if match_start > self.limit {
+                    return Ok(ReadReady::Exception(Self::limit_overrun_error(
+                        py,
+                        "Separator is found, but chunk is longer than limit",
+                        match_start,
+                    )?));
+                }
+                let data = self.unread_bytes_object(py, match_end);
+                self.maybe_resume_transport(py)?;
+                return Ok(ReadReady::Result(data));
+            }
+            // Everything except the last `max_len - 1` bytes is known to be
+            // free of any separator; that span must fit within the limit.
+            let offset = (buflen + 1).saturating_sub(separators.max_len);
+            if offset > self.limit {
+                return Ok(ReadReady::Exception(Self::limit_overrun_error(
+                    py,
+                    "Separator is not found, and chunk exceed the limit",
+                    offset,
+                )?));
+            }
         }
+
+        if self.eof {
+            let err = Self::incomplete_read_error(py, self.buffer.unread(), None)?;
+            self.buffer.consume_all();
+            return Ok(ReadReady::Exception(err));
+        }
+        Ok(ReadReady::Wait)
+    }
+
+    /// Attempt to satisfy a read of the given kind against the current buffer,
+    /// reducing it to a deliverable payload. Shared by the ready-future fast
+    /// paths and the pending-waiter path so each kind's logic lives in one place.
+    fn resolve_read(&mut self, py: Python<'_>, kind: &ReadWaitKind) -> PyResult<ReadReady> {
+        Ok(match kind {
+            ReadWaitKind::Any(n) => {
+                if self.buffer.is_empty() && !self.eof {
+                    ReadReady::Wait
+                } else {
+                    let data = self.unread_bytes_object(py, *n);
+                    self.maybe_resume_transport(py)?;
+                    ReadReady::Result(data)
+                }
+            }
+            ReadWaitKind::Exact(n) => {
+                let n = *n;
+                if self.buffer.len() >= n {
+                    let data = self.unread_bytes_object(py, n);
+                    self.maybe_resume_transport(py)?;
+                    ReadReady::Result(data)
+                } else if !self.eof {
+                    ReadReady::Wait
+                } else {
+                    let err = Self::incomplete_read_error(py, self.buffer.unread(), Some(n))?;
+                    self.buffer.consume_all();
+                    ReadReady::Exception(err)
+                }
+            }
+            ReadWaitKind::Until(separators) => return self.resolve_until(py, separators),
+            ReadWaitKind::All => {
+                if !self.eof {
+                    ReadReady::Wait
+                } else {
+                    ReadReady::Result(self.unread_all_bytes_object(py))
+                }
+            }
+        })
+    }
+
+    /// Fast path: build a fresh future for a read of the given kind. A stored
+    /// stream exception wins over everything; otherwise the read is resolved
+    /// immediately if the buffer can satisfy it, or a pending waiter is created.
+    fn build_ready_future(
+        &mut self,
+        py: Python<'_>,
+        func_name: &str,
+        kind: ReadWaitKind,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(fut) = self.ready_exception_future_if_set(py)? {
+            return Ok(fut);
+        }
+        match self.resolve_read(py, &kind)? {
+            ReadReady::Result(data) => self.ready_result_future(py, data),
+            ReadReady::Exception(err) => self.ready_exception_future(py, err),
+            ReadReady::Wait => self.start_waiter(py, func_name, kind),
+        }
+    }
+
+    fn build_read_future(&mut self, py: Python<'_>, n: isize) -> PyResult<Py<PyAny>> {
         if n == 0 {
             return self.ready_result_future(py, Self::bytes_object(py, &[]));
         }
-        if n < 0 {
-            if self.eof {
-                let data = self.unread_all_bytes_object(py);
-                return self.ready_result_future(py, data);
-            }
-            return self.start_waiter(py, "read", ReadWaitKind::All);
-        }
-        if !self.buffer.is_empty() || self.eof {
-            let data = self.unread_bytes_object(py, n as usize);
-            self.maybe_resume_transport(py)?;
-            return self.ready_result_future(py, data);
-        }
-        self.start_waiter(py, "read", ReadWaitKind::Any(n as usize))
+        let kind = if n < 0 {
+            ReadWaitKind::All
+        } else {
+            ReadWaitKind::Any(n as usize)
+        };
+        self.build_ready_future(py, "read", kind)
     }
 
     fn build_readexactly_future(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
-        if let Some(exc) = self.exception.as_ref() {
-            return self.ready_exception_future(py, exc.clone_ref(py));
-        }
         if n == 0 {
             return self.ready_result_future(py, Self::bytes_object(py, &[]));
         }
-        if self.buffer.len() >= n {
-            let data = self.unread_bytes_object(py, n);
-            self.maybe_resume_transport(py)?;
-            return self.ready_result_future(py, data);
-        }
-        if self.eof {
-            let err = Self::incomplete_read_error(py, self.buffer.unread(), n)?;
-            self.buffer.consume_all();
-            return self.ready_exception_future(py, err);
-        }
-        self.start_waiter(py, "readexactly", ReadWaitKind::Exact(n))
+        self.build_ready_future(py, "readexactly", ReadWaitKind::Exact(n))
     }
+
+    fn build_readuntil_future(
+        &mut self,
+        py: Python<'_>,
+        separators: Separators,
+    ) -> PyResult<Py<PyAny>> {
+        self.build_ready_future(py, "readuntil", ReadWaitKind::Until(separators))
+    }
+
+    fn limit_overrun_error(
+        py: Python<'_>,
+        message: &str,
+        consumed: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let asyncio = py.import("asyncio")?;
+        Ok(asyncio
+            .getattr("LimitOverrunError")?
+            .call1((message, consumed))?
+            .unbind())
+    }
+
 }
 
 #[pymethods]
@@ -518,6 +691,17 @@ impl PyFastStreamReader {
     fn readexactly(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
         self.build_readexactly_future(py, n)
     }
+
+    #[pyo3(signature = (separator=None))]
+    fn readuntil(
+        &mut self,
+        py: Python<'_>,
+        separator: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let separators = Separators::new(extract_separators(separator)?)?;
+        self.build_readuntil_future(py, separators)
+    }
+
 }
 
 #[pyclass(module = "rsloop._loop")]
