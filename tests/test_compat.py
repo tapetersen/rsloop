@@ -954,7 +954,6 @@ class CompatibilityTests(unittest.TestCase):
     # divergences rather than intentional ones.
     # ------------------------------------------------------------------
 
-    @unittest.expectedFailure
     def test_stream_reader_supports_readline(self) -> None:
         # asyncio.StreamReader.readline() — fast-stream reader lacks it.
         async def main() -> bytes:

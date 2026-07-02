@@ -661,13 +661,21 @@ impl PyFastStreamReader {
         self.build_ready_future(py, "readexactly", ReadWaitKind::Exact(n))
     }
 
-    #[pyo3(signature = (separator=None))]
+    #[pyo3(signature = (separator=None), text_signature = "(separator=b'\n')")]
     fn readuntil(
         &mut self,
         py: Python<'_>,
         separator: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let separators = Separators::new(extract_separators(separator)?)?;
+        self.build_ready_future(py, "readuntil", ReadWaitKind::Until(separators))
+    }
+
+    fn readline(
+        &mut self,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let separators = Separators::new(vec![Box::from(&b"\n"[..])])?;
         self.build_ready_future(py, "readuntil", ReadWaitKind::Until(separators))
     }
 }
