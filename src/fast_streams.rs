@@ -382,17 +382,7 @@ impl PyFastStreamReader {
         Ok(None)
     }
 
-    fn start_waiter(
-        &mut self,
-        py: Python<'_>,
-        func_name: &str,
-        kind: ReadWaitKind,
-    ) -> PyResult<Py<PyAny>> {
-        if self.waiter.is_some() {
-            return Err(PyValueError::new_err(format!(
-                "{func_name}() called while another coroutine is already waiting for incoming data"
-            )));
-        }
+    fn start_waiter(&mut self, py: Python<'_>, kind: ReadWaitKind) -> PyResult<Py<PyAny>> {
         if self.paused && !self.transport.bind(py).is_none() {
             self.paused = false;
             python_names::call_method0(
@@ -496,15 +486,14 @@ impl PyFastStreamReader {
                 }
             }
             ReadWaitKind::Exact(n) => {
-                let n = *n;
-                if self.buffer.len() >= n {
-                    let data = self.unread_bytes_object(py, n);
+                if self.buffer.len() >= *n {
+                    let data = self.unread_bytes_object(py, *n);
                     self.maybe_resume_transport(py)?;
                     ReadReady::Result(data)
                 } else if !self.eof {
                     ReadReady::Wait
                 } else {
-                    let err = Self::incomplete_read_error(py, self.buffer.unread(), Some(n))?;
+                    let err = Self::incomplete_read_error(py, self.buffer.unread(), Some(*n))?;
                     self.buffer.consume_all();
                     ReadReady::Exception(err)
                 }
@@ -529,13 +518,18 @@ impl PyFastStreamReader {
         func_name: &str,
         kind: ReadWaitKind,
     ) -> PyResult<Py<PyAny>> {
+        if self.waiter.is_some() {
+            return Err(PyValueError::new_err(format!(
+                "{func_name}() called while another coroutine is already waiting for incoming data"
+            )));
+        }
         if let Some(fut) = self.ready_exception_future_if_set(py)? {
             return Ok(fut);
         }
         match self.resolve_read(py, &kind)? {
             ReadReady::Result(data) => self.ready_result_future(py, data),
             ReadReady::Exception(err) => self.ready_exception_future(py, err),
-            ReadReady::Wait => self.start_waiter(py, func_name, kind),
+            ReadReady::Wait => self.start_waiter(py, kind),
         }
     }
 
