@@ -256,11 +256,7 @@ impl PyFastStreamReader {
         python_names::call_method0(py, self.loop_obj.bind(py), python_names::create_future(py))
     }
 
-    fn ready_result_future(
-        &self,
-        py: Python<'_>,
-        value: Py<PyBytes>,
-    ) -> PyResult<Py<PyAny>> {
+    fn ready_result_future(&self, py: Python<'_>, value: Py<PyBytes>) -> PyResult<Py<PyAny>> {
         let future = self.create_future(py)?;
         python_names::call_method1(
             py,
@@ -543,45 +539,13 @@ impl PyFastStreamReader {
         }
     }
 
-    fn build_read_future(&mut self, py: Python<'_>, n: isize) -> PyResult<Py<PyAny>> {
-        if n == 0 {
-            return self.ready_result_future(py, Self::bytes_object(py, &[]));
-        }
-        let kind = if n < 0 {
-            ReadWaitKind::All
-        } else {
-            ReadWaitKind::Any(n as usize)
-        };
-        self.build_ready_future(py, "read", kind)
-    }
-
-    fn build_readexactly_future(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
-        if n == 0 {
-            return self.ready_result_future(py, Self::bytes_object(py, &[]));
-        }
-        self.build_ready_future(py, "readexactly", ReadWaitKind::Exact(n))
-    }
-
-    fn build_readuntil_future(
-        &mut self,
-        py: Python<'_>,
-        separators: Separators,
-    ) -> PyResult<Py<PyAny>> {
-        self.build_ready_future(py, "readuntil", ReadWaitKind::Until(separators))
-    }
-
-    fn limit_overrun_error(
-        py: Python<'_>,
-        message: &str,
-        consumed: usize,
-    ) -> PyResult<Py<PyAny>> {
+    fn limit_overrun_error(py: Python<'_>, message: &str, consumed: usize) -> PyResult<Py<PyAny>> {
         let asyncio = py.import("asyncio")?;
         Ok(asyncio
             .getattr("LimitOverrunError")?
             .call1((message, consumed))?
             .unbind())
     }
-
 }
 
 #[pymethods]
@@ -685,11 +649,22 @@ impl PyFastStreamReader {
 
     #[pyo3(signature = (n=-1))]
     fn read(&mut self, py: Python<'_>, n: isize) -> PyResult<Py<PyAny>> {
-        self.build_read_future(py, n)
+        if n == 0 {
+            return self.ready_result_future(py, Self::bytes_object(py, &[]));
+        }
+        let kind = if n < 0 {
+            ReadWaitKind::All
+        } else {
+            ReadWaitKind::Any(n as usize)
+        };
+        self.build_ready_future(py, "read", kind)
     }
 
     fn readexactly(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
-        self.build_readexactly_future(py, n)
+        if n == 0 {
+            return self.ready_result_future(py, Self::bytes_object(py, &[]));
+        }
+        self.build_ready_future(py, "readexactly", ReadWaitKind::Exact(n))
     }
 
     #[pyo3(signature = (separator=None))]
@@ -699,9 +674,8 @@ impl PyFastStreamReader {
         separator: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let separators = Separators::new(extract_separators(separator)?)?;
-        self.build_readuntil_future(py, separators)
+        self.build_ready_future(py, "readuntil", ReadWaitKind::Until(separators))
     }
-
 }
 
 #[pyclass(module = "rsloop._loop")]
@@ -1187,9 +1161,10 @@ fn native_stream_loop(
     }
     if let Some(kwargs) = kwargs
         && let Some(ssl) = kwargs.get_item("ssl")?
-            && !ssl.is_none() {
-                return Ok(None);
-            }
+        && !ssl.is_none()
+    {
+        return Ok(None);
+    }
     Ok(Some(loop_obj))
 }
 
